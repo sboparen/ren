@@ -1,0 +1,135 @@
+#!/usr/bin/env python2
+#
+# The MIT License
+#
+# Copyright (c) 2011 Simon Parent
+#
+# Permission is hereby granted, free of charge, to any person
+# obtaining a copy of this software and associated documentation
+# files (the "Software"), to deal in the Software without
+# restriction, including without limitation the rights to use, copy,
+# modify, merge, publish, distribute, sublicense, and/or sell copies
+# of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+# KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+# WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE
+# AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
+import os, sys, tempfile
+def die(msg):
+  sys.stderr.write(msg + "\n")
+  exit(1)
+
+# Usage and options.
+from optparse import OptionParser
+parser = OptionParser(usage="""%prog [OPTION]... FILE...
+Rename files with your favourite EDITOR.""", version='1.0')
+parser.add_option('-r', action='store', dest='cmdfile',
+  help='apply commands from FILE in reverse', metavar='FILE')
+(options, args) = parser.parse_args()
+if args == []:
+  f = os.popen('find * -maxdepth 0 -not -type d -print0')
+  args = f.read().rstrip("\0").split("\0")
+  f.close()
+
+# Get the list of rename commands.
+commands = []
+if options.cmdfile:
+  f = open(options.cmdfile)
+  lineno = 0
+  while True:
+    src = f.readline()
+    dst = f.readline()
+    blank = f.readline()
+    lineno += 3
+    if len(src) == 0:
+      break
+    if len(dst) == 0 or len(blank) == 0:
+      die('%s: Unexpected end of file.' % options.cmdfile)
+    if blank != "\n":
+      die('%s:%d: Line should be blank.' % (options.cmdfile, lineno))
+    commands.append((dst.rstrip("\n"), src.rstrip("\n")))
+  f.close()
+else:
+  fd, fname = tempfile.mkstemp('', 'ren-temp-', None, True)
+  f = os.fdopen(fd, 'w')
+  f.write("""# Change the file names below as desired.
+# Save and quit to perform the rename.
+# Do not change the number of lines (including these lines).
+""")
+  for file in args:
+    f.write(file + "\n")
+  f.close()
+  editor = os.getenv('EDITOR', default='vi')
+  exitcode = os.spawnvp(os.P_WAIT, editor, [editor, fname])
+  if exitcode != 0:
+    die('Edit failed, aborting.')
+  f = open(fname)
+  dsts = [line.rstrip("\n") for line in f.readlines()[3:]]
+  f.close()
+  if len(args) != len(dsts):
+    die('File list length does not match, aborting.')
+  commands = zip(args, dsts)
+
+# Remove any commands which do nothing.
+commands = [(src, dst) for src, dst in commands if src != dst]
+if len(commands) == 0:
+  exit(0)
+
+# Save the commands, mainly so that they can be undone later.
+home = os.getenv('HOME')
+if home:
+  rendir, prefix = home+'/.ren/', ''
+else:
+  rendir, prefix = './', '.ren-commands-'
+if not os.path.isdir(rendir):
+  os.mkdir(rendir)
+fd, fname = tempfile.mkstemp('', prefix, rendir, True)
+f = os.fdopen(fd, 'w')
+for src, dst in commands:
+  f.write(src + "\n" + dst + "\n\n")
+f.close()
+print("Rename commands saved to '%s'." % fname)
+
+# Add intermediate steps to break cycles.
+# If the suffix collides with any filenames, the next step will abort.
+suffix = '.TEMP'
+commands = [(src, src+suffix) for src, dst in commands] +\
+           [(src+suffix, dst) for src, dst in commands]
+
+# Simulate the rename commands.
+# If something bad would happen, abort the whole thing.
+exists = {}
+for src, dst in commands:
+  if not exists.get(src, os.path.isfile(src)):
+    die("Can't rename nonexistent file '%s', aborting." % src)
+  if exists.get(dst, os.path.exists(dst)):
+    die("Rename would overwrite file '%s', aborting." % dst)
+  exists[src] = False
+  exists[dst] = True
+
+# Execute the rename commands.
+# Hopefully nothing bad happens here.
+# If something bad does happen, don't try to roll it back,
+# for fear of making things even worse.
+for src, dst in commands:
+  print "Renaming '%s' to '%s'." % (src, dst)
+  try:
+    os.link(src, dst)
+    os.unlink(src)
+  except Exception, e:
+    print e
+    die(("Unexpected failure renaming '%s' to '%s', aborting.\n" +
+         "ONLY SOME FILES WERE RENAMED") % (src, dst))
+
+# Done!
+print 'Done. To undo, type:'
+print "%s -r '%s'" % (os.path.basename(sys.argv[0]), fname)
