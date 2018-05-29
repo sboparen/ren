@@ -9,7 +9,7 @@ variable `$EDITOR`) to rename files!
 Executing the following commands
 
 ```
-$ touch a.txt b.txt c.txy                   
+$ touch a.txt b.txt c.txy
 $ ren
 ```
 
